@@ -396,7 +396,7 @@ class EndPoint(models.Model):
 
 	@hybrid_property
 	def is_alive(self):
-		return self.http_status and (0 < self.http_status < 500) and self.http_status != 404
+		return self.http_status and (0 < self.http_status < 500)
 
 
 class VulnerabilityTags(models.Model):
