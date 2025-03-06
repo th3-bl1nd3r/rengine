@@ -457,25 +457,42 @@ def get_domain_from_subdomain(subdomain):
 
 
 def sanitize_url(http_url):
-	"""Removes HTTP ports 80 and 443 from HTTP URL because it's ugly.
+    """Removes HTTP ports 80 and 443 from HTTP URL because it's ugly.
 
-	Args:
-		http_url (str): Input HTTP URL.
+    Args:
+        http_url (str): Input HTTP URL.
 
-	Returns:
-		str: Stripped HTTP URL.
-	"""
-	# Check if the URL has a scheme. If not, add a temporary one to prevent empty netloc.
-	if "://" not in http_url:
-		http_url = "http://" + http_url
-	url = urlparse(http_url)
+    Returns:
+        str: Stripped HTTP URL.
+    """
+    # Check if the URL has a scheme. If not, add a temporary one to prevent empty netloc.
+    if "://" not in http_url:
+        http_url = "http://" + http_url
 
-	if url.netloc.endswith(':80'):
-		url = url._replace(netloc=url.netloc.replace(':80', ''))
-	elif url.netloc.endswith(':443'):
-		url = url._replace(scheme=url.scheme.replace('http', 'https'))
-		url = url._replace(netloc=url.netloc.replace(':443', ''))
-	return url.geturl().rstrip('/')
+    # Store the original path to preserve exact formatting with semicolons
+    original_path = http_url.split('://', 1)[1]
+    if '/' in original_path:
+        original_path = '/' + original_path.split('/', 1)[1]
+    else:
+        original_path = ''
+
+    url = urlparse(http_url)
+
+    # Handle ports
+    if url.netloc.endswith(':80'):
+        netloc = url.netloc.replace(':80', '')
+        scheme = url.scheme
+    elif url.netloc.endswith(':443'):
+        netloc = url.netloc.replace(':443', '')
+        scheme = 'https'
+    else:
+        netloc = url.netloc
+        scheme = url.scheme
+
+    # Manually reconstruct the URL to preserve the exact path including semicolons
+    result = f"{scheme}://{netloc}{original_path}"
+
+    return result
 
 def extract_path_from_url(url):
 	parsed_url = urlparse(url)
