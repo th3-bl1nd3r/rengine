@@ -2600,7 +2600,8 @@ def dalfox_xss_scan(self, urls=[], ctx={}, description=None):
 
 		vuln_data = parse_dalfox_result(line)
 
-		http_url = sanitize_url(line.get('data'))
+		# http_url = sanitize_url(line.get('data'))
+		http_url = line.get('data')
 		subdomain_name = get_subdomain_from_url(http_url)
 
 		# TODO: this should be get only
