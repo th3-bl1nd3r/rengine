@@ -593,22 +593,137 @@ def send_telegram_message(message):
 		return
 	telegram_bot_token = notif.telegram_bot_token
 	telegram_bot_chat_id = notif.telegram_bot_chat_id
+	message_thread_id = None
+	if '/' in telegram_bot_chat_id:
+		chat_parts = telegram_bot_chat_id.split('/')
+		telegram_bot_chat_id = chat_parts[0]
+
+		if len(chat_parts) > 1:
+			try:
+				message_thread_id = int(chat_parts[1])
+			except ValueError:
+				logger.error(f"Invalid thread ID in telegram_bot_chat_id: {chat_parts[1]}")
 
 	send_url = f'https://api.telegram.org/bot{telegram_bot_token}/sendMessage'
-	special_chars = ['_','#','-','.']
-	for char in special_chars:
-	   message = message.replace(char, f'\{char}')
-	print("-"*50)
-	print(message)
-	params = {
-	'chat_id': telegram_bot_chat_id,
-	'text': message,
-	'parse_mode': 'MarkdownV2'
-	}
-	response = requests.get(send_url, params=params)
-	print(response)
-	print("-"*50)
+	message = prepare_markdown_v2(message)
 
+	params = {
+		'chat_id': telegram_bot_chat_id,
+		'text': message,
+		'parse_mode': 'MarkdownV2'
+	}
+
+	# Add message_thread_id to params if it exists
+	if message_thread_id:
+		params['message_thread_id'] = message_thread_id
+
+	response = requests.get(send_url, params=params)
+	print(message)
+	print(response.text)
+def send_vulnerability_telegram_message(vuln, severity, http_url, subdomain_name):
+    """Send vulnerability information to Telegram.
+
+    Args:
+        vuln (Vulnerability): Vulnerability model instance
+        severity (str): Severity of the vulnerability
+        http_url (str): URL where the vulnerability was found
+        subdomain_name (str): Name of the subdomain
+    """
+    notif = Notification.objects.first()
+
+    # Check if notifications and Telegram notifications are enabled
+    if not (notif and notif.send_to_telegram and notif.telegram_bot_token and notif.telegram_bot_chat_id):
+        return
+
+    # Format the message
+    message = f"*VULNERABILITY FOUND*\n"
+    severity_circle = {
+        'info': '🔵',     # Blue circle
+        'low': '🟢',      # Green circle
+        'medium': '🟡',   # Yellow circle
+        'high': '🟠',     # Orange circle
+        'critical': '🔴', # Red circle
+        'unknown': '⚪️'   # White circle
+    }
+    circle = severity_circle.get(severity.lower(), '⚪️')
+    message += f"*Severity*: {circle} {severity.upper()}\n"
+    message += f"*URL*: {http_url}\n"
+    message += f"*Subdomain*: {subdomain_name}\n"
+    message += f"*Name*: {vuln.name}\n"
+    message += f"*Type*: {vuln.type}\n"
+
+    # Add description if available
+    if vuln.description:
+        # Truncate description if it's too long
+        description = vuln.description[:300] + "..." if len(vuln.description) > 300 else vuln.description
+        message += f"*Description*: {description}\n"
+
+    # Add template URL if available
+    if vuln.template_url:
+        message += f"*Template*: {vuln.template_url}\n"
+
+    # Add tags if available
+    tags = vuln.get_tags_str()
+    if tags:
+        message += f"*Tags*: {tags}\n"
+
+    # Add CVEs if available
+    cve_str = vuln.get_cve_str()
+    if cve_str:
+        message += f"*CVEs*: {cve_str}\n"
+
+    # Add CWEs if available
+    cwe_str = vuln.get_cwe_str()
+    if cwe_str:
+        message += f"*CWEs*: {cwe_str}\n"
+
+    # Add references if available
+    refs_str = vuln.get_refs_str()
+    if refs_str:
+        message += f"*References*: {refs_str}\n"
+
+    # Send the message
+    send_telegram_message(message)
+
+def prepare_markdown_v2(text):
+    # List of special characters that need escaping in MarkdownV2
+    special_chars = ['_', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+
+    # First, find and temporarily replace all markdown links
+    link_pattern = r'\[(.*?)\]\((.*?)\)'
+    links = re.findall(link_pattern, text)
+
+    # Replace links with placeholders
+    placeholder_count = 0
+    for link_text, link_url in links:
+        placeholder = f"LINKPLACEHOLDER{placeholder_count}"
+        text = text.replace(f"[{link_text}]({link_url})", placeholder)
+        placeholder_count += 1
+
+    # Escape all special characters in the text
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+
+    # Restore links with proper escaping
+    placeholder_count = 0
+    for link_text, link_url in links:
+        # Escape special chars in link text but not the brackets and parentheses for the link structure
+        escaped_text = link_text
+        for char in special_chars:
+            if char not in ['[', ']', '(', ')']:
+                escaped_text = escaped_text.replace(char, f'\\{char}')
+
+        # Escape special chars in URL
+        escaped_url = link_url
+        for char in special_chars:
+            if char not in ['(', ')']:
+                escaped_url = escaped_url.replace(char, f'\\{char}')
+
+        placeholder = f"LINKPLACEHOLDER{placeholder_count}"
+        text = text.replace(placeholder, f"[{escaped_text}]({escaped_url})")
+        placeholder_count += 1
+
+    return text
 
 def send_slack_message(message):
 	"""Send Slack message.

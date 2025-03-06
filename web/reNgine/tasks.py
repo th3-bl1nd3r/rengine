@@ -2230,7 +2230,8 @@ def nuclei_individual_severity_module(self, cmd, severity, enable_http_crawl, sh
 				severity_map[severity],
 				fields,
 				add_meta_info=False)
-
+		if send_vuln:
+		  send_vulnerability_telegram_message(vuln, severity, http_url, subdomain_name)
 		"""
 			Send report to hackerone when
 			1. send_report is True from Hackerone model in ScanEngine
@@ -3074,9 +3075,9 @@ def send_notif(
 		**options):
 	if not 'title' in options:
 		message = enrich_notification(message, scan_history_id, subscan_id)
-	send_discord_message(message, **options)
-	send_slack_message(message)
-	send_lark_message(message)
+	# send_discord_message(message, **options)
+	# send_slack_message(message)
+	# send_lark_message(message)
 	send_telegram_message(message)
 
 
@@ -3238,7 +3239,7 @@ def send_task_notif(
 		severity = STATUS_TO_SEVERITIES.get(status)
 
 	msg = f'{title} {status}\n'
-	msg += '\n🔔 '.join(f'**{k}:** {v}' for k, v in fields.items())
+	msg += '\n🔔 '.join(f'*{k}:* {v}' for k, v in fields.items())
 
 	# Add fields to update
 	for k, v in update_fields.items():
