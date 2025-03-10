@@ -15,7 +15,7 @@ import xmltodict
 
 from time import sleep
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from celery.utils.log import get_task_logger
 from discord_webhook import DiscordEmbed, DiscordWebhook
 from django.db.models import Q
@@ -436,7 +436,7 @@ def get_domain_from_subdomain(subdomain):
 
 	if not validators.domain(subdomain):
 		return None
-	
+
 	# Use tldextract to parse the subdomain
 	extracted = tldextract.extract(subdomain)
 
@@ -450,32 +450,49 @@ def get_domain_from_subdomain(subdomain):
 			domain = '.'.join(parts[-2:])
 		else:
 			return None
-		
+
 	# Validate the domain before returning
 	return domain if validators.domain(domain) else None
 
 
 
 def sanitize_url(http_url):
-	"""Removes HTTP ports 80 and 443 from HTTP URL because it's ugly.
+    """Removes HTTP ports 80 and 443 from HTTP URL because it's ugly.
 
-	Args:
-		http_url (str): Input HTTP URL.
+    Args:
+        http_url (str): Input HTTP URL.
 
-	Returns:
-		str: Stripped HTTP URL.
-	"""
-	# Check if the URL has a scheme. If not, add a temporary one to prevent empty netloc.
-	if "://" not in http_url:
-		http_url = "http://" + http_url
-	url = urlparse(http_url)
+    Returns:
+        str: Stripped HTTP URL.
+    """
+    # Check if the URL has a scheme. If not, add a temporary one to prevent empty netloc.
+    if "://" not in http_url:
+        http_url = "http://" + http_url
 
-	if url.netloc.endswith(':80'):
-		url = url._replace(netloc=url.netloc.replace(':80', ''))
-	elif url.netloc.endswith(':443'):
-		url = url._replace(scheme=url.scheme.replace('http', 'https'))
-		url = url._replace(netloc=url.netloc.replace(':443', ''))
-	return url.geturl().rstrip('/')
+    # Store the original path to preserve exact formatting with semicolons
+    original_path = http_url.split('://', 1)[1]
+    if '/' in original_path:
+        original_path = '/' + original_path.split('/', 1)[1]
+    else:
+        original_path = ''
+
+    url = urlparse(http_url)
+
+    # Handle ports
+    if url.netloc.endswith(':80'):
+        netloc = url.netloc.replace(':80', '')
+        scheme = url.scheme
+    elif url.netloc.endswith(':443'):
+        netloc = url.netloc.replace(':443', '')
+        scheme = 'https'
+    else:
+        netloc = url.netloc
+        scheme = url.scheme
+
+    # Manually reconstruct the URL to preserve the exact path including semicolons
+    result = f"{scheme}://{netloc}{original_path}"
+
+    return result
 
 def extract_path_from_url(url):
 	parsed_url = urlparse(url)
@@ -593,9 +610,137 @@ def send_telegram_message(message):
 		return
 	telegram_bot_token = notif.telegram_bot_token
 	telegram_bot_chat_id = notif.telegram_bot_chat_id
-	send_url = f'https://api.telegram.org/bot{telegram_bot_token}/sendMessage?chat_id={telegram_bot_chat_id}&parse_mode=Markdown&text={message}'
-	requests.get(send_url)
+	message_thread_id = None
+	if '/' in telegram_bot_chat_id:
+		chat_parts = telegram_bot_chat_id.split('/')
+		telegram_bot_chat_id = chat_parts[0]
 
+		if len(chat_parts) > 1:
+			try:
+				message_thread_id = int(chat_parts[1])
+			except ValueError:
+				logger.error(f"Invalid thread ID in telegram_bot_chat_id: {chat_parts[1]}")
+
+	send_url = f'https://api.telegram.org/bot{telegram_bot_token}/sendMessage'
+	message = prepare_markdown_v2(message)
+
+	params = {
+		'chat_id': telegram_bot_chat_id,
+		'text': message,
+		'parse_mode': 'MarkdownV2'
+	}
+
+	# Add message_thread_id to params if it exists
+	if message_thread_id:
+		params['message_thread_id'] = message_thread_id
+
+	response = requests.get(send_url, params=params)
+	print(message)
+	print(response.text)
+def send_vulnerability_telegram_message(vuln, severity, http_url, subdomain_name):
+    """Send vulnerability information to Telegram.
+
+    Args:
+        vuln (Vulnerability): Vulnerability model instance
+        severity (str): Severity of the vulnerability
+        http_url (str): URL where the vulnerability was found
+        subdomain_name (str): Name of the subdomain
+    """
+    notif = Notification.objects.first()
+
+    # Check if notifications and Telegram notifications are enabled
+    if not (notif and notif.send_to_telegram and notif.telegram_bot_token and notif.telegram_bot_chat_id):
+        return
+
+    # Format the message
+    message = f"*VULNERABILITY FOUND*\n"
+    severity_circle = {
+        'info': '🔵',     # Blue circle
+        'low': '🟢',      # Green circle
+        'medium': '🟡',   # Yellow circle
+        'high': '🟠',     # Orange circle
+        'critical': '🔴', # Red circle
+        'unknown': '⚪️'   # White circle
+    }
+    circle = severity_circle.get(severity.lower(), '⚪️')
+    message += f"*Severity*: {circle} {severity.upper()}\n"
+    message += f"*URL*: {http_url}\n"
+    message += f"*Subdomain*: {subdomain_name}\n"
+    message += f"*Name*: {vuln.name}\n"
+    message += f"*Type*: {vuln.type}\n"
+
+    # Add description if available
+    if vuln.description:
+        # Truncate description if it's too long
+        description = vuln.description[:300] + "..." if len(vuln.description) > 300 else vuln.description
+        message += f"*Description*: {description}\n"
+
+    # Add template URL if available
+    if vuln.template_url:
+        message += f"*Template*: {vuln.template_url}\n"
+
+    # Add tags if available
+    tags = vuln.get_tags_str()
+    if tags:
+        message += f"*Tags*: {tags}\n"
+
+    # Add CVEs if available
+    cve_str = vuln.get_cve_str()
+    if cve_str:
+        message += f"*CVEs*: {cve_str}\n"
+
+    # Add CWEs if available
+    cwe_str = vuln.get_cwe_str()
+    if cwe_str:
+        message += f"*CWEs*: {cwe_str}\n"
+
+    # Add references if available
+    refs_str = vuln.get_refs_str()
+    if refs_str:
+        message += f"*References*: {refs_str}\n"
+
+    # Send the message
+    send_telegram_message(message)
+
+def prepare_markdown_v2(text):
+    # List of special characters that need escaping in MarkdownV2
+    special_chars = ['_', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+
+    # First, find and temporarily replace all markdown links
+    link_pattern = r'\[(.*?)\]\((.*?)\)'
+    links = re.findall(link_pattern, text)
+
+    # Replace links with placeholders
+    placeholder_count = 0
+    for link_text, link_url in links:
+        placeholder = f"LINKPLACEHOLDER{placeholder_count}"
+        text = text.replace(f"[{link_text}]({link_url})", placeholder)
+        placeholder_count += 1
+
+    # Escape all special characters in the text
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+
+    # Restore links with proper escaping
+    placeholder_count = 0
+    for link_text, link_url in links:
+        # Escape special chars in link text but not the brackets and parentheses for the link structure
+        escaped_text = link_text
+        for char in special_chars:
+            if char not in ['[', ']', '(', ')']:
+                escaped_text = escaped_text.replace(char, f'\\{char}')
+
+        # Escape special chars in URL
+        escaped_url = link_url
+        for char in special_chars:
+            if char not in ['(', ')']:
+                escaped_url = escaped_url.replace(char, f'\\{char}')
+
+        placeholder = f"LINKPLACEHOLDER{placeholder_count}"
+        text = text.replace(placeholder, f"[{escaped_text}]({escaped_url})")
+        placeholder_count += 1
+
+    return text
 
 def send_slack_message(message):
 	"""Send Slack message.
@@ -823,8 +968,8 @@ def get_scan_fields(engine, scan, subscan=None, status='RUNNING', tasks=[]):
 	# Build fields
 	url = get_scan_url(scan.id)
 	fields = {
-		'Status': f'**{status}**',
-		'Engine': engine.engine_name,
+		'Status': f'*{status}*',
+		'Engine': f'`{engine.engine_name}`',
 		'Scan ID': f'[#{scan.id}]({url})'
 	}
 
@@ -1011,7 +1156,7 @@ def get_domain_historical_ip_address(domain):
 	}
 	response = requests.get(url, headers=headers)
 	soup = BeautifulSoup(response.content, 'lxml')
-	table = soup.find("table", {"border" : "1"})					   
+	table = soup.find("table", {"border" : "1"})
 	for row in table or []:
 		ip = row.findAll('td')[0].getText()
 		location = row.findAll('td')[1].getText()
@@ -1058,14 +1203,14 @@ def parse_llm_vulnerability_report(report):
 	report = report.replace('**', '')
 	data = {}
 	sections = re.split(r'\n(?=(?:Description|Impact|Remediation|References):)', report.strip())
-	
+
 	try:
 		for section in sections:
 			if not section.strip():
 				continue
-			
+
 			section_title, content = re.split(r':\n', section.strip(), maxsplit=1)
-			
+
 			if section_title == 'Description':
 				data['description'] = content.strip()
 			elif section_title == 'Impact':
@@ -1076,7 +1221,7 @@ def parse_llm_vulnerability_report(report):
 				data['references'] = [ref.strip() for ref in content.split('\n') if ref.strip()]
 	except Exception as e:
 		return data
-	
+
 	return data
 
 
@@ -1111,11 +1256,11 @@ def create_scan_object(host_id, engine_id, initiated_by_id=None):
 
 def get_port_service_description(port):
 	"""
-		Retrieves the standard service name and description for a given port 
+		Retrieves the standard service name and description for a given port
 		number using whatportis and the builtin socket library as fallback.
 
 		Args:
-			port (int or str): The port number to look up. 
+			port (int or str): The port number to look up.
 				Can be an integer or a string representation of an integer.
 
 		Returns:
@@ -1125,7 +1270,7 @@ def get_port_service_description(port):
 	try:
 		port = int(port)
 		whatportis_result = whatportis.get_ports(str(port))
-		
+
 		if whatportis_result and whatportis_result[0].name:
 			return {
 				"service_name": whatportis_result[0].name,
@@ -1154,7 +1299,7 @@ def get_port_service_description(port):
 
 def update_or_create_port(port_number, service_name=None, description=None):
 	"""
-		Updates or creates a new Port object with the provided information to 
+		Updates or creates a new Port object with the provided information to
 		avoid storing duplicate entries when service or description information is updated.
 
 		Args:
@@ -1168,13 +1313,13 @@ def update_or_create_port(port_number, service_name=None, description=None):
 	created = False
 	try:
 		port = Port.objects.get(number=port_number)
-		
+
 		# avoid updating None values in service and description if they already exist
 		if service_name is not None and port.service_name != service_name:
 			port.service_name = service_name
 		if description is not None and port.description != description:
 			port.description = description
-		port.save()	
+		port.save()
 	except Port.DoesNotExist:
 		# for cases if the port doesn't exist, create a new one
 		port = Port.objects.create(
@@ -1185,17 +1330,17 @@ def update_or_create_port(port_number, service_name=None, description=None):
 		created = True
 	finally:
 		return port, created
-	
+
 
 def exclude_urls_by_patterns(exclude_paths, urls):
 	"""
 		Filter out URLs based on a list of exclusion patterns provided from user
-		
+
 		Args:
-			exclude_patterns (list of str): A list of patterns to exclude. 
+			exclude_patterns (list of str): A list of patterns to exclude.
 			These can be plain path or regex.
 			urls (list of str): A list of URLs to filter from.
-			
+
 		Returns:
 			list of str: A new list containing URLs that don't match any exclusion pattern.
 	"""
@@ -1203,7 +1348,7 @@ def exclude_urls_by_patterns(exclude_paths, urls):
 	if not exclude_paths:
 		# if no exclude paths are passed and is empty list return all urls as it is
 		return urls
-	
+
 	compiled_patterns = []
 	for path in exclude_paths:
 		# treat each path as either regex or plain path
@@ -1225,13 +1370,13 @@ def exclude_urls_by_patterns(exclude_paths, urls):
 				if pattern in url: #if the word matches anywhere in url exclude
 					exclude = True
 					break
-		
+
 		# if none conditions matches then add the url to filtered urls
 		if not exclude:
 			filtered_urls.append(url)
 
 	return filtered_urls
-	
+
 
 def get_domain_info_from_db(target):
 	"""
@@ -1251,7 +1396,7 @@ def get_domain_info_from_db(target):
 		return extract_domain_info(domain)
 	except Domain.DoesNotExist:
 		return None
-	
+
 def extract_domain_info(domain):
 	"""
 		Extract domain info from the domain_info_db.
@@ -1263,10 +1408,10 @@ def extract_domain_info(domain):
 	"""
 	if not domain:
 		return DottedDict()
-	
+
 	domain_name = domain.name
 	domain_info_db = domain.domain_info
-	
+
 	try:
 		domain_info = DottedDict({
 			'dnssec': domain_info_db.dnssec,
@@ -1295,7 +1440,7 @@ def extract_domain_info(domain):
 			if registration:
 				domain_info.update({
 					f'{role}_{key}': getattr(registration, key)
-					for key in ['name', 'id_str', 'organization', 'city', 'state', 'zip_code', 
+					for key in ['name', 'id_str', 'organization', 'city', 'state', 'zip_code',
 								'country', 'phone', 'fax', 'email', 'address']
 				})
 
@@ -1337,7 +1482,7 @@ def format_whois_response(domain_info):
 		Args:
 			domain_info (DottedDict): The domain info object.
 		Returns:
-			dict: The formatted whois response.	
+			dict: The formatted whois response.
 	"""
 	return {
 		'status': True,
@@ -1473,10 +1618,10 @@ def save_domain_info_to_db(target, domain_info):
 	"""Save domain info to the database."""
 	if Domain.objects.filter(name=target).exists():
 		domain, _ = Domain.objects.get_or_create(name=target)
-		
+
 		# Create or update DomainInfo
 		domain_info_obj, created = DomainInfo.objects.get_or_create(domain=domain)
-		
+
 		# Update basic domain information
 		domain_info_obj.dnssec = domain_info.get('dnssec', False)
 		domain_info_obj.created = domain_info.get('created')
@@ -1584,11 +1729,11 @@ def create_inappnotification(
 ):
 	"""
 		This function will create an inapp notification
-		Inapp Notification not to be confused with Notification model 
+		Inapp Notification not to be confused with Notification model
 		that is used for sending alerts on telegram, slack etc.
 		Inapp notification is used to show notification on the web app
 
-		Args: 
+		Args:
 			title: str: Title of the notification
 			description: str: Description of the notification
 			notification_type: str: Type of the notification, it can be either
@@ -1607,10 +1752,10 @@ def create_inappnotification(
 	logger.info('Creating InApp Notification with title: %s', title)
 	if notification_type not in [SYSTEM_LEVEL_NOTIFICATION, PROJECT_LEVEL_NOTIFICATION]:
 		raise ValueError("Invalid notification type")
-	
+
 	if status not in [choice[0] for choice in NOTIFICATION_STATUS_TYPES]:
 		raise ValueError("Invalid notification status")
-	
+
 	project = None
 	if notification_type == PROJECT_LEVEL_NOTIFICATION:
 		if not project_slug:
@@ -1619,7 +1764,7 @@ def create_inappnotification(
 			project = Project.objects.get(slug=project_slug)
 		except Project.DoesNotExist as e:
 			raise ValueError(f"No project exists: {e}")
-		
+
 	notification = InAppNotification(
 		title=title,
 		description=description,
@@ -1673,21 +1818,21 @@ def is_valid_nmap_command(cmd):
 	# if this is not a valid command nmap command at all, dont even run it
 	if not cmd.strip().startswith('nmap'):
 		return False
-	
+
 	# check for dangerous chars
 	dangerous_chars = {';', '&', '|', '>', '<', '`', '$', '(', ')', '#', '\\'}
 	if any(char in cmd for char in dangerous_chars):
 		return False
-		
+
 	# but we also need to check for flags and options, for example - and -- are allowed
 	parts = cmd.split()
 	for part in parts[1:]: # ignoring nmap the first part of command
 		if part.startswith('-') or part.startswith('--'):
 			continue
-		
+
 		# check for valid characters, . - etc are allowed in valid nmap command
 		if all(c.isalnum() or c in '.,/-_' for c in part):
 			continue
 		return False
-		
+
 	return True
