@@ -148,7 +148,6 @@ def initiate_scan(
 			subscan_id=None,
 			engine_id=engine_id,
 			status=CELERY_TASK_STATUS_MAP[scan.scan_status])
-
 		# Save imported subdomains in DB
 		save_imported_subdomains(imported_subdomains, ctx=ctx)
 
@@ -545,12 +544,23 @@ def subdomain_discovery(
 
 	# Gather all the tools' results in one single file. Write subdomains into
 	# separate files, and sort all subdomains.
-	run_command(
-		f'cat {self.results_dir}/subdomains_*.txt > {self.output_path}',
+	# Add the imported subdomains to the final output
+	imported_subdomains_file = f'{self.results_dir}/from_imported.txt'
+	if os.path.exists(imported_subdomains_file):
+	    run_command(
+		f'cat {self.results_dir}/subdomains_*.txt {imported_subdomains_file} > {self.output_path}',
 		shell=True,
 		history_file=self.history_file,
 		scan_id=self.scan_id,
 		activity_id=self.activity_id)
+	else:
+	    run_command(
+        f'cat {self.results_dir}/subdomains_*.txt > {self.output_path}',
+        shell=True,
+        history_file=self.history_file,
+        scan_id=self.scan_id,
+        activity_id=self.activity_id)
+
 	run_command(
 		f'sort -u {self.output_path} -o {self.output_path}',
 		shell=True,
